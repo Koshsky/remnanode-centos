@@ -1,26 +1,31 @@
-# remnanode.sh — Ansible-провижининг ремнанод (Ubuntu 24.04)
+# remnanode.sh
 
-Полная настройка свежих машин **Ubuntu 24.04 (noble)** через Ansible:
-безопасность (SSH-ключи, fail2ban, UFW), обновления (в т.ч. unattended-upgrades),
-Docker, nginx-замена — Caddy (SSL сам), RemnaNode и мониторинг парка (Beszel).
+Ansible-провижининг ремнанод на **Ubuntu 24.04 (noble)**.
 
-Единственный ввод при первом запуске — **root-логин и пароль** машины. Дальше
-Ansible работает по сгенерированным SSH-ключам.
+`ansible-playbook` (playbooks/provision.yml) выполняет полную настройку свежих
+машин одним прогоном: безопасность (SSH-ключи, hardening sshd, fail2ban, UFW),
+обновления (unattended-upgrades), Docker CE, обратный прокси Caddy с авто-SSL
+вместо nginx/certbot, RemnaNode и мониторинг парка (Beszel-агент).
 
-## Как это устроено (ответ на «а как реконнект?»)
+Парк авторизуется по **единому park-ключу** (`playbooks/keys/park/id_ed25519`),
+который генерируется при первом запуске. Единственный внешний ввод при первом
+запуске — root-логин и пароль машины; далее Ansible работает по ключу.
 
-- При первом запуске для каждого хоста генерируется ключевая пара
-  (`keys/<host>/id_ed25519`, каталог в `.gitignore`), публичная часть кладётся в
-  `authorized_keys` **и root, и создаваемого пользователя** — **до** применения
-  харднинга sshd.
+## Как это устроено
+
+- При первом запуске генерируется единая ключевая пара парка
+  (`playbooks/keys/park/id_ed25519`, каталог не в версионном контроле); её
+  публичная часть кладётся в `authorized_keys` **и root, и создаваемого
+  пользователя** — **до** применения hardening sshd.
 - sshd: `PermitRootLogin prohibit-password` — root **по паролю запрещён всегда**,
   по ключу разрешён (нужно Ansible); парольная аутентификация отключена.
 - Первый запуск: `root + пароль` (`-k`). Повторные: `root + ключ`, без пароля.
-- Человек работает под `NEW_USER_LOGIN` (sudo), Ansible — под root по ключу.
-- Потерял ключи? → `playbooks/ops/rekey.yml` перевыпускает и переустанавливает их
+- Операции на нодах выполняются под пользователем `NEW_USER_LOGIN` (sudo);
+  Ansible подключается как root по ключу.
+- Потеря ключей: `playbooks/ops/rekey.yml` перевыпускает и переустанавливает их
   (последний рубеж — консоль провайдера).
 
-## Требования (контрольная машина — у тебя)
+## Требования
 
 ```bash
 pip install ansible
@@ -71,15 +76,16 @@ cp inventory/group_vars/all/vars.yml.template inventory/group_vars/all/vars.yml 
 ## Запуск
 
 ```bash
-# первая настройка парка (спросит root-пароль каждого хоста):
+# первая настройка парка (будет запрошен root-пароль каждого хоста):
 ansible-playbook -i inventory/hosts.ini playbooks/provision.yml -k
 
 # повторные запуски (по ключам, идемпотентно):
 ansible-playbook -i inventory/hosts.ini playbooks/provision.yml
 ```
 
-Новая машина = добавить строку в `inventory/hosts.ini` (`<name> ansible_host=<IP> ansible_user=root`)
-и прогнать playbook — hub Beszel при этом трогать не нужно (агент регистрируется сам).
+Новая машина добавляется строкой в `inventory/hosts.ini`
+(`<name> ansible_host=<IP> ansible_user=root`) с последующим прогоном playbook —
+hub Beszel трогать не нужно (агент регистрируется сам).
 
 ### Домены / разные доменные зоны
 
@@ -92,9 +98,9 @@ ansible-playbook -i inventory/hosts.ini playbooks/provision.yml
   # DOMAIN_ZONE: shop.example
   ```
   `host_vars` перекрывает `group_vars/all`. Если hostname машины должен совпадать
-  с первым сегментом кастомного домена — переименуйте хост в инвентаре.
+  с первым сегментом кастомного домена — хост переименовывается в инвентаре.
 
-### Секреты на ноду (обязательно для парка!)
+### Секреты на ноду (требование для парка)
 
 RemnaWave выдаёт **по-НОДНЫЙ** secret (внутри зашиты сертификаты ноды), Beszel —
 ключ/токен **на систему** (Add System). Если у нескольких нод один общий секрет —
@@ -105,11 +111,11 @@ REMNAWAVE_SECRET_KEY: "eyJ...секрет из Settings → Node этой нод
 BESZEL_AGENT_KEY: "ssh-ed25519 AAAA..."   # из Add System этой ноды
 BESZEL_TOKEN: "xxxxxxxx-xxxx-..."
 ```
-Провижининг предупредит (не упадёт), если секреты у нескольких нод совпадают.
+Провижининг выведет предупреждение (без ошибки), если секреты у нескольких нод совпадают.
 
 ## Что делает playbook
 
-1. Генерирует ключи, ставит hostname (имя из инвентаря) и обновляет систему.
+1. Генерирует park-ключ, ставит hostname (имя из инвентаря) и обновляет систему.
 2. Пакеты: Docker CE (+ compose plugin), fail2ban, ufw, openssh-server, sudo, unattended-upgrades.
 3. Пользователь + SSH-ключи (root и user) → sshd (свой порт, root-пароль и пароли запрещены).
 4. fail2ban (sshd) и UFW (default deny).
@@ -134,16 +140,16 @@ BESZEL_TOKEN: "xxxxxxxx-xxxx-..."
 - Уведомления: опциональный `UNATTENDED_UPGRADES_MAIL` — только при наличии MTA
   на хосте; авто-перезагрузка всегда `false`.
 - **Ручной прогон playbook** при этом делает *полное* обновление (`apt full-upgrade`,
-  включая ядра из `-updates`) — это осознанное действие оператора; в авто-режиме
+  включая ядра из `-updates`) — осознанное действие оператора; в авто-режиме
   (unattended-upgrades) обновляется только security.
 
 ### Секреты (ansible-vault)
 
-`inventory/group_vars/all/vars.yml` и `keys/` gitignored, но лежат на диске открытым текстом.
-Для продакшена рекомендуется зашифровать секреты:
+`inventory/group_vars/all/vars.yml` и `playbooks/keys/` gitignored, но лежат на диске
+открытым текстом. Для продакшена секреты рекомендуется зашифровать:
 
 ```bash
-ansible-vault encrypt inventory/group_vars/all/vars.yml       # пароль спросит при запуске
+ansible-vault encrypt inventory/group_vars/all/vars.yml       # пароль будет запрошен при запуске
 ansible-playbook ... --ask-vault-pass
 # либо переменные окружения: ANSIBLE_VAULT_PASSWORD_FILE=...
 ```
@@ -168,13 +174,14 @@ ansible.cfg, requirements.yml
 inventory/                   # hosts.example.ini (шаблон), hosts.ini (gitignored)
 inventory/group_vars/all/vars.yml.template
 playbooks/provision.yml      # полная настройка ноды
-playbooks/ops/rekey.yml      # перевыпуск ключей
-keys/                        # gitignored: сгенерированные ключи по хостам
+playbooks/ops/rekey.yml      # перевыпуск park-ключа
+playbooks/ops/bootstrap_keys.py  # разовый первичный вход (root-пароль) на свежие ноды
+playbooks/keys/              # gitignored: единый park-ключ парка
 roles/
   base/          hostname, apt, пакеты, unattended-upgrades
   security/      пользователь, sshd_config.j2, ключи, fail2ban, ufw
   docker/        Docker CE + compose plugin
-  caddy/         landing/health за xray + ACME-сертификаты (unix-сокет, PROXY protocol)
+  caddy/         landing/health за xray + ACME-сертификаты (TCP-loopback 127.0.0.1:8445)
   remnanode/     compose.j2 + zapret cron
   beszel/        агент (compose.j2) + UFW-правило
   maintenance/   cron (reboot), logrotate
@@ -182,14 +189,15 @@ roles/
 
 ## Устранение неполадок
 
-- `Все порты молчат, таймауты` — пакеты не доходят до машины: проверь публичный IP
+- `Все порты молчат, таймауты` — пакеты не доходят до машины: проверить публичный IP
   ноды (`curl -s ifconfig.me` на ней), DNS, фаервол/панель провайдера.
 - `401 от Beszel` — ключ/токен не совпадают с hub: перевыпустить через Add System.
-- `https://<domain>/health` молчит, хотя caddy/xray Up — проверь в панели RemnaWave
+- `https://<domain>/health` молчит, хотя caddy/xray Up — проверить в панели RemnaWave
   fallback ноды: dest должен быть `127.0.0.1:8445` (tcp), а не `/dev/shm/nginx.sock`
   (unix-сокет Caddy больше не создаёт).
 - `Connection timed out` во время провижининга при открытом ufw/верном порте — fail2ban
-  забанил твой IP (ControlMaster в `ansible.cfg` держит одно соединение на хост, так что
-  на новых прогонах это исключено; текущий бан: `fail2ban-client set sshd unbanip <твой_IP>`
-  с консоли ноды или подождать bantime=3600).
-- Ручной доступ к машине: `ssh -p {{ SSH_PORT }} {{ NEW_USER_LOGIN }}@<IP>` (ключ из `keys/<host>/`).
+  забанил IP контрольной машины (ControlMaster в `ansible.cfg` держит одно соединение
+  на хост, так что на новых прогонах это исключено; текущий бан снять с консоли ноды:
+  `fail2ban-client set sshd unbanip <IP>` либо подождать bantime=3600).
+- Ручной доступ к машине: `ssh -p {{ SSH_PORT }} {{ NEW_USER_LOGIN }}@<IP>`
+  (ключ — `playbooks/keys/park/id_ed25519`).
